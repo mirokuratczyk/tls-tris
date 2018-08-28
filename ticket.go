@@ -13,7 +13,15 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
+
+	// [Psiphon]
+	"crypto/rand"
+	"math/big"
+	math_rand "math/rand"
 )
+
+// [Psiphon]
+var obfuscateSessionTickets = true
 
 // A SessionTicketSealer provides a way to securely encapsulate
 // session state for storage on the client. All methods are safe for
@@ -73,6 +81,22 @@ func (s *sessionState) marshal() []byte {
 	length := 2 + 2 + 2 + len(s.masterSecret) + 2
 	for _, cert := range s.certificates {
 		length += 4 + len(cert)
+	}
+
+	// [Psiphon]
+	// Pad golang TLS session ticket to a more typical size.
+	if obfuscateSessionTickets {
+		paddedSizes := []int{160, 176, 192, 208, 218, 224, 240, 255}
+		initialSize := 120
+		randomInt, err := rand.Int(rand.Reader, big.NewInt(int64(len(paddedSizes))))
+		index := 0
+		if err == nil {
+			index = int(randomInt.Int64())
+		} else {
+			index = math_rand.Intn(len(paddedSizes))
+		}
+		paddingSize := paddedSizes[index] - initialSize
+		length += paddingSize
 	}
 
 	ret := make([]byte, length)
@@ -143,9 +167,11 @@ func (s *sessionState) unmarshal(data []byte) alert {
 		data = data[certLen:]
 	}
 
-	if len(data) != 0 {
-		return alertDecodeError
-	}
+	// [Psiphon]
+	// Ignore padding for obfuscated session tickets
+	//if len(data) != 0 {
+	//	return alertDecodeError
+	//}
 	return alertSuccess
 }
 

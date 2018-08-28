@@ -8,6 +8,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"strings"
+
+	// [Psiphon]
+	"crypto/rand"
+	"math/big"
+	math_rand "math/rand"
 )
 
 // signAlgosCertList helper function returns either list of signature algorithms in case
@@ -2402,6 +2407,24 @@ func (m *newSessionTicketMsg) marshal() (x []byte) {
 	x[8] = uint8(ticketLen >> 8)
 	x[9] = uint8(ticketLen)
 	copy(x[10:], m.ticket)
+
+	// [Psiphon]
+	// Set lifetime hint to a more typical value.
+	if obfuscateSessionTickets {
+		hints := []int{300, 1200, 7200, 10800, 64800, 100800, 129600}
+		randomInt, err := rand.Int(rand.Reader, big.NewInt(int64(len(hints))))
+		index := 0
+		if err == nil {
+			index = int(randomInt.Int64())
+		} else {
+			index = math_rand.Intn(len(hints))
+		}
+		hint := hints[index]
+		x[4] = uint8(hint >> 24)
+		x[5] = uint8(hint >> 16)
+		x[6] = uint8(hint >> 8)
+		x[7] = uint8(hint)
+	}
 
 	m.raw = x
 
