@@ -13,7 +13,12 @@ import (
 	"crypto/rand"
 	"math/big"
 	math_rand "math/rand"
+
+	"github.com/Psiphon-Labs/psiphon-tunnel-core/psiphon/common"
 )
+
+// [Psiphon]
+var randomizeClientHello = true
 
 // signAlgosCertList helper function returns either list of signature algorithms in case
 // signature_algorithms_cert extension should be marshalled or nil in the other case.
@@ -138,6 +143,13 @@ func (m *clientHelloMsg) equal(i interface{}) bool {
 }
 
 func (m *clientHelloMsg) marshal() []byte {
+
+	// [Psiphon]
+	// Note: the original marshal function is retained as-is for ease of merging upstream changes.
+	if randomizeClientHello {
+		return m.randomizedMarshal()
+	}
+
 	if m.raw != nil {
 		return m.raw
 	}
@@ -433,6 +445,488 @@ func (m *clientHelloMsg) marshal() []byte {
 	if m.delegatedCredential {
 		binary.BigEndian.PutUint16(z, extensionDelegatedCredential)
 		z = z[4:]
+	}
+
+	m.raw = x
+
+	return x
+}
+
+// [Psiphon]
+//
+// Randomize the ClientHello. The offered algorithms are shuffled and
+// truncated (longer lists are selected with higher probability). Extensions
+// are shuffled, certain extensions may be omitted, and some additional
+// extensions may be added in.
+//
+// Inspired by parrotRandomized in utls:
+// https://github.com/refraction-networking/utls/blob/db1b65d2300d3a59616a43d2df4ea556b4a7d277/u_parrots.go#L300
+func (m *clientHelloMsg) randomizedMarshal() []byte {
+	if m.raw != nil {
+		return m.raw
+	}
+
+	permute := func(n int, swap func(i, j int)) {
+		if n < 2 {
+			return
+		}
+		perm, err := common.MakeSecureRandomPerm(n)
+		if err == nil {
+			for i, j := range perm {
+				swap(i, j)
+			}
+		}
+	}
+
+	truncate := func(n int, cut func(i int)) {
+		i := n
+		for ; i > 1; i-- {
+			if !common.FlipCoin() {
+				break
+			}
+		}
+		if i < n {
+			cut(i)
+		}
+	}
+
+	// Keep TLS 1.3 cipher suites ordered first, as required.
+	numTLS13CipherSuites := 0
+	for ; numTLS13CipherSuites < len(m.cipherSuites); numTLS13CipherSuites++ {
+		// TODO: check suiteTLS13 flag?
+		if m.cipherSuites[numTLS13CipherSuites]>>8 != 0x13 {
+			break
+		}
+	}
+	if numTLS13CipherSuites > 1 {
+		tls13CipherSuites := m.cipherSuites[:numTLS13CipherSuites]
+		permute(
+			len(tls13CipherSuites),
+			func(i, j int) {
+				tls13CipherSuites[i], tls13CipherSuites[j] = tls13CipherSuites[j], tls13CipherSuites[i]
+			})
+	}
+	if numTLS13CipherSuites < len(m.cipherSuites) {
+		olderCipherSuites := m.cipherSuites[numTLS13CipherSuites:]
+		permute(
+			len(olderCipherSuites),
+			func(i, j int) {
+				olderCipherSuites[i], olderCipherSuites[j] = olderCipherSuites[j], olderCipherSuites[i]
+			})
+		truncate(
+			len(olderCipherSuites),
+			func(i int) { m.cipherSuites = m.cipherSuites[:numTLS13CipherSuites+i] })
+	}
+
+	permute(
+		len(m.supportedCurves),
+		func(i, j int) {
+			m.supportedCurves[i], m.supportedCurves[j] = m.supportedCurves[j], m.supportedCurves[i]
+		})
+	truncate(
+		len(m.supportedCurves),
+		func(i int) { m.supportedCurves = m.supportedCurves[:i] })
+
+	permute(
+		len(m.supportedPoints),
+		func(i, j int) {
+			m.supportedPoints[i], m.supportedPoints[j] = m.supportedPoints[j], m.supportedPoints[i]
+		})
+	truncate(
+		len(m.supportedPoints),
+		func(i int) { m.supportedPoints = m.supportedPoints[:i] })
+
+	permute(
+		len(m.supportedSignatureAlgorithms),
+		func(i, j int) {
+			m.supportedSignatureAlgorithms[i], m.supportedSignatureAlgorithms[j] = m.supportedSignatureAlgorithms[j], m.supportedSignatureAlgorithms[i]
+		})
+	truncate(
+		len(m.supportedSignatureAlgorithms),
+		func(i int) { m.supportedSignatureAlgorithms = m.supportedSignatureAlgorithms[:i] })
+
+	permute(
+		len(m.supportedSignatureAlgorithmsCert),
+		func(i, j int) {
+			m.supportedSignatureAlgorithmsCert[i], m.supportedSignatureAlgorithmsCert[j] = m.supportedSignatureAlgorithmsCert[j], m.supportedSignatureAlgorithmsCert[i]
+		})
+	truncate(
+		len(m.supportedSignatureAlgorithmsCert),
+		func(i int) { m.supportedSignatureAlgorithmsCert = m.supportedSignatureAlgorithmsCert[:i] })
+
+	m.alpnProtocols = []string{"h2", "http/1.1"}
+
+	if common.FlipCoin() {
+		m.supportedVersions = []uint16{VersionTLS13, VersionTLS12, VersionTLS11, VersionTLS10}
+	}
+
+	numExtensions := 0
+	extensionsLength := 0
+	extensionMarshalers := make([]func(), 0)
+	var z []byte
+
+	// Indicates whether to send signature_algorithms_cert extension
+	if m.nextProtoNeg {
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionNextProtoNeg >> 8)
+				z[1] = byte(extensionNextProtoNeg & 0xff)
+				// The length is always 0
+				z = z[4:]
+			})
+	}
+	if m.ocspStapling && common.FlipCoin() { // May be omitted
+		extensionsLength += 1 + 2 + 2
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// RFC 4366, section 3.6
+				z[0] = byte(extensionStatusRequest >> 8)
+				z[1] = byte(extensionStatusRequest)
+				z[2] = 0
+				z[3] = 5
+				z[4] = 1 // OCSP type
+				// Two zero valued uint16s for the two lengths.
+				z = z[9:]
+			})
+	}
+	if len(m.serverName) > 0 {
+		extensionsLength += 5 + len(m.serverName)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionServerName >> 8)
+				z[1] = byte(extensionServerName & 0xff)
+				l := len(m.serverName) + 5
+				z[2] = byte(l >> 8)
+				z[3] = byte(l)
+				z = z[4:]
+
+				// RFC 3546, section 3.1
+				//
+				// struct {
+				//     NameType name_type;
+				//     select (name_type) {
+				//         case host_name: HostName;
+				//     } name;
+				// } ServerName;
+				//
+				// enum {
+				//     host_name(0), (255)
+				// } NameType;
+				//
+				// opaque HostName<1..2^16-1>;
+				//
+				// struct {
+				//     ServerName server_name_list<1..2^16-1>
+				// } ServerNameList;
+
+				z[0] = byte((len(m.serverName) + 3) >> 8)
+				z[1] = byte(len(m.serverName) + 3)
+				z[3] = byte(len(m.serverName) >> 8)
+				z[4] = byte(len(m.serverName))
+				copy(z[5:], []byte(m.serverName))
+				z = z[l:]
+			})
+	}
+	if len(m.supportedCurves) > 0 {
+		extensionsLength += 2 + 2*len(m.supportedCurves)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// http://tools.ietf.org/html/rfc4492#section-5.5.1
+				// https://tools.ietf.org/html/draft-ietf-tls-tls13-18#section-4.2.4
+				z[0] = byte(extensionSupportedCurves >> 8)
+				z[1] = byte(extensionSupportedCurves)
+				l := 2 + 2*len(m.supportedCurves)
+				z[2] = byte(l >> 8)
+				z[3] = byte(l)
+				l -= 2
+				z[4] = byte(l >> 8)
+				z[5] = byte(l)
+				z = z[6:]
+				for _, curve := range m.supportedCurves {
+					z[0] = byte(curve >> 8)
+					z[1] = byte(curve)
+					z = z[2:]
+				}
+			})
+	}
+	if len(m.supportedPoints) > 0 {
+		extensionsLength += 1 + len(m.supportedPoints)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// http://tools.ietf.org/html/rfc4492#section-5.5.2
+				z[0] = byte(extensionSupportedPoints >> 8)
+				z[1] = byte(extensionSupportedPoints)
+				l := 1 + len(m.supportedPoints)
+				z[2] = byte(l >> 8)
+				z[3] = byte(l)
+				l--
+				z[4] = byte(l)
+				z = z[5:]
+				for _, pointFormat := range m.supportedPoints {
+					z[0] = pointFormat
+					z = z[1:]
+				}
+			})
+	}
+	if m.ticketSupported {
+		extensionsLength += len(m.sessionTicket)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// http://tools.ietf.org/html/rfc5077#section-3.2
+				z[0] = byte(extensionSessionTicket >> 8)
+				z[1] = byte(extensionSessionTicket)
+				l := len(m.sessionTicket)
+				z[2] = byte(l >> 8)
+				z[3] = byte(l)
+				z = z[4:]
+				copy(z, m.sessionTicket)
+				z = z[len(m.sessionTicket):]
+			})
+	}
+	if len(m.supportedSignatureAlgorithms) > 0 {
+		extensionsLength += 2 + 2*len(m.supportedSignatureAlgorithms)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z = marshalExtensionSignatureAlgorithms(extensionSignatureAlgorithms, z, m.supportedSignatureAlgorithms)
+			})
+	}
+	if m.getSignatureAlgorithmsCert() != nil {
+		extensionsLength += 2 + 2*len(m.getSignatureAlgorithmsCert())
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// Ensure only one list of algorithms is sent if supported_algorithms and supported_algorithms_cert are the same
+				z = marshalExtensionSignatureAlgorithms(extensionSignatureAlgorithmsCert, z, m.getSignatureAlgorithmsCert())
+			})
+	}
+	if m.secureRenegotiationSupported && common.FlipCoin() { // May be omitted
+		extensionsLength += 1 + len(m.secureRenegotiation)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionRenegotiationInfo >> 8)
+				z[1] = byte(extensionRenegotiationInfo & 0xff)
+				z[2] = 0
+				z[3] = byte(len(m.secureRenegotiation) + 1)
+				z[4] = byte(len(m.secureRenegotiation))
+				z = z[5:]
+				copy(z, m.secureRenegotiation)
+				z = z[len(m.secureRenegotiation):]
+			})
+	}
+	if len(m.alpnProtocols) > 0 {
+		extensionsLength += 2
+		for _, s := range m.alpnProtocols {
+			if l := len(s); l == 0 || l > 255 {
+				panic("invalid ALPN protocol")
+			}
+			extensionsLength++
+			extensionsLength += len(s)
+		}
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionALPN >> 8)
+				z[1] = byte(extensionALPN & 0xff)
+				lengths := z[2:]
+				z = z[6:]
+
+				stringsLength := 0
+				for _, s := range m.alpnProtocols {
+					l := len(s)
+					z[0] = byte(l)
+					copy(z[1:], s)
+					z = z[1+l:]
+					stringsLength += 1 + l
+				}
+
+				lengths[2] = byte(stringsLength >> 8)
+				lengths[3] = byte(stringsLength)
+				stringsLength += 2
+				lengths[0] = byte(stringsLength >> 8)
+				lengths[1] = byte(stringsLength)
+			})
+	}
+	if m.scts && common.FlipCoin() { // May be omitted
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// https://tools.ietf.org/html/rfc6962#section-3.3.1
+				z[0] = byte(extensionSCT >> 8)
+				z[1] = byte(extensionSCT)
+				// zero uint16 for the zero-length extension_data
+				z = z[4:]
+			})
+	}
+	if len(m.keyShares) > 0 {
+		extensionsLength += 2
+		for _, k := range m.keyShares {
+			extensionsLength += 4 + len(k.data)
+		}
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				// https://tools.ietf.org/html/draft-ietf-tls-tls13-18#section-4.2.5
+				z[0] = byte(extensionKeyShare >> 8)
+				z[1] = byte(extensionKeyShare)
+				lengths := z[2:]
+				z = z[6:]
+
+				totalLength := 0
+				for _, ks := range m.keyShares {
+					z[0] = byte(ks.group >> 8)
+					z[1] = byte(ks.group)
+					z[2] = byte(len(ks.data) >> 8)
+					z[3] = byte(len(ks.data))
+					copy(z[4:], ks.data)
+					z = z[4+len(ks.data):]
+					totalLength += 4 + len(ks.data)
+				}
+
+				lengths[2] = byte(totalLength >> 8)
+				lengths[3] = byte(totalLength)
+				totalLength += 2
+				lengths[0] = byte(totalLength >> 8)
+				lengths[1] = byte(totalLength)
+			})
+	}
+	if len(m.supportedVersions) > 0 {
+		extensionsLength += 1 + 2*len(m.supportedVersions)
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionSupportedVersions >> 8)
+				z[1] = byte(extensionSupportedVersions)
+				l := 1 + 2*len(m.supportedVersions)
+				z[2] = byte(l >> 8)
+				z[3] = byte(l)
+				l -= 1
+				z[4] = byte(l)
+				z = z[5:]
+				for _, v := range m.supportedVersions {
+					z[0] = byte(v >> 8)
+					z[1] = byte(v)
+					z = z[2:]
+				}
+			})
+	}
+	if m.earlyData {
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				z[0] = byte(extensionEarlyData >> 8)
+				z[1] = byte(extensionEarlyData)
+				z = z[4:]
+			})
+	}
+	if m.delegatedCredential {
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				binary.BigEndian.PutUint16(z, extensionDelegatedCredential)
+				z = z[4:]
+			})
+	}
+
+	// Optional, additional extensions
+
+	// TODO: GREASE, Extended Master Secret (https://github.com/cloudflare/tls-tris/pull/30)
+
+	if common.FlipCoin() {
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				extensionChannelID := uint16(30032)
+				z[0] = byte(extensionChannelID >> 8)
+				z[1] = byte(extensionChannelID & 0xff)
+				z = z[4:]
+			})
+	}
+
+	preExtensionLength := 2 + 32 + 1 + len(m.sessionId) + 2 + len(m.cipherSuites)*2 + 1 + len(m.compressionMethods)
+
+	if common.FlipCoin() {
+
+		// Padding must be last, since it depends on extensionsLength
+
+		// Logic from:
+		// https://github.com/google/boringssl/blob/46db7af2c998cf8514d606408546d9be9699f03c/ssl/t1_lib.c#L2803
+		// https://github.com/google/boringssl/blob/master/LICENSE
+
+		unpaddedLength := preExtensionLength
+		if numExtensions > 0 {
+			unpaddedLength += 2 + 4*numExtensions + extensionsLength
+		}
+		if unpaddedLength > 0xff && unpaddedLength < 0x200 {
+			paddingLength := uint16(0x200) - uint16(unpaddedLength)
+			if paddingLength >= 4+1 {
+				paddingLength -= 4
+			} else {
+				paddingLength = 1
+			}
+			extensionsLength += int(paddingLength)
+			numExtensions++
+			extensionMarshalers = append(extensionMarshalers,
+				func() {
+					extensionPadding := uint16(21)
+					z[0] = byte(extensionPadding >> 8)
+					z[1] = byte(extensionPadding & 0xff)
+					z[2] = byte(paddingLength >> 8)
+					z[3] = byte(paddingLength)
+					z = z[4+paddingLength:]
+				})
+		}
+	}
+
+	permute(
+		len(extensionMarshalers),
+		func(i, j int) {
+			extensionMarshalers[i], extensionMarshalers[j] = extensionMarshalers[j], extensionMarshalers[i]
+		})
+
+	length := preExtensionLength
+
+	if numExtensions > 0 {
+		extensionsLength += 4 * numExtensions
+		length += 2 + extensionsLength
+	}
+
+	x := make([]byte, 4+length)
+	x[0] = typeClientHello
+	x[1] = uint8(length >> 16)
+	x[2] = uint8(length >> 8)
+	x[3] = uint8(length)
+	x[4] = uint8(m.vers >> 8)
+	x[5] = uint8(m.vers)
+	copy(x[6:38], m.random)
+	x[38] = uint8(len(m.sessionId))
+	copy(x[39:39+len(m.sessionId)], m.sessionId)
+	y := x[39+len(m.sessionId):]
+	y[0] = uint8(len(m.cipherSuites) >> 7)
+	y[1] = uint8(len(m.cipherSuites) << 1)
+	for i, suite := range m.cipherSuites {
+		y[2+i*2] = uint8(suite >> 8)
+		y[3+i*2] = uint8(suite)
+	}
+	z = y[2+len(m.cipherSuites)*2:]
+	z[0] = uint8(len(m.compressionMethods))
+	copy(z[1:], m.compressionMethods)
+	z = z[1+len(m.compressionMethods):]
+
+	if numExtensions > 0 {
+		z[0] = byte(extensionsLength >> 8)
+		z[1] = byte(extensionsLength)
+		z = z[2:]
+		for _, extensionMarshaler := range extensionMarshalers {
+			extensionMarshaler()
+		}
 	}
 
 	m.raw = x

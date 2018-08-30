@@ -54,8 +54,9 @@ func allCipherSuites() []uint16 {
 func init() {
 
 	// [Psiphon]
-	// Disable obfuscation since its transforms won't match pre-recorded test data
+	// Disable obfuscation and randomization since its transforms won't match pre-recorded test data
 	obfuscateSessionTickets = false
+	randomizeClientHello = false
 
 	testConfig = &Config{
 		Time:               func() time.Time { return time.Unix(0, 0) },
