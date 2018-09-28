@@ -162,7 +162,7 @@ func (*clientHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 	m.keyShares = make([]keyShare, rand.Intn(4))
 	for i := range m.keyShares {
 		m.keyShares[i].group = CurveID(rand.Intn(30000))
-		m.keyShares[i].data = randomBytes(rand.Intn(300), rand)
+		m.keyShares[i].data = randomBytes(rand.Intn(300)+1, rand)
 	}
 	m.supportedVersions = make([]uint16, rand.Intn(5))
 	for i := range m.supportedVersions {
@@ -171,7 +171,12 @@ func (*clientHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 	if rand.Intn(10) > 5 {
 		m.earlyData = true
 	}
-
+	if rand.Intn(10) > 5 {
+		m.delegatedCredential = true
+	}
+	if rand.Intn(10) > 5 {
+		m.extendedMSSupported = true
+	}
 	return reflect.ValueOf(m)
 }
 
@@ -199,19 +204,22 @@ func (*serverHelloMsg) Generate(rand *rand.Rand, size int) reflect.Value {
 	if rand.Intn(10) > 5 {
 		m.ticketSupported = true
 	}
+	if rand.Intn(10) > 5 {
+		m.extendedMSSupported = true
+	}
 	m.alpnProtocol = randomString(rand.Intn(32)+1, rand)
 
 	if rand.Intn(10) > 5 {
 		numSCTs := rand.Intn(4)
 		m.scts = make([][]byte, numSCTs)
 		for i := range m.scts {
-			m.scts[i] = randomBytes(rand.Intn(500), rand)
+			m.scts[i] = randomBytes(rand.Intn(500)+1, rand)
 		}
 	}
 
 	if rand.Intn(10) > 5 {
-		m.keyShare.group = CurveID(rand.Intn(30000))
-		m.keyShare.data = randomBytes(rand.Intn(300), rand)
+		m.keyShare.group = CurveID(rand.Intn(30000) + 1)
+		m.keyShare.data = randomBytes(rand.Intn(300)+1, rand)
 	}
 	if rand.Intn(10) > 5 {
 		m.psk = true
@@ -344,6 +352,9 @@ func (*sessionState) Generate(rand *rand.Rand, size int) reflect.Value {
 	s.vers = uint16(rand.Intn(10000))
 	s.cipherSuite = uint16(rand.Intn(10000))
 	s.masterSecret = randomBytes(rand.Intn(100), rand)
+	if rand.Intn(10) > 5 {
+		s.usedEMS = true
+	}
 	numCerts := rand.Intn(20)
 	s.certificates = make([][]byte, numCerts)
 	for i := 0; i < numCerts; i++ {

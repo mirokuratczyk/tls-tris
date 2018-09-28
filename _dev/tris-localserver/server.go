@@ -32,11 +32,10 @@ type server struct {
 }
 
 var tlsVersionToName = map[uint16]string{
-	tls.VersionTLS10:        "1.0",
-	tls.VersionTLS11:        "1.1",
-	tls.VersionTLS12:        "1.2",
-	tls.VersionTLS13:        "1.3",
-	tls.VersionTLS13Draft28: "1.3 (draft 28)",
+	tls.VersionTLS10: "1.0",
+	tls.VersionTLS11: "1.1",
+	tls.VersionTLS12: "1.2",
+	tls.VersionTLS13: "1.3",
 }
 
 func NewServer() *server {
@@ -73,6 +72,7 @@ func (s *server) start() {
 	s.TLS.ClientCAs = x509.NewCertPool()
 	s.TLS.ClientCAs.AppendCertsFromPEM([]byte(rsaCa_client))
 	s.TLS.Accept0RTTData = ((s.ZeroRTT & ZeroRTT_Accept) == ZeroRTT_Accept)
+	s.TLS.NextProtos = []string{"npn_proto"}
 
 	httpServer := &http.Server{
 		Addr:      s.Address,
