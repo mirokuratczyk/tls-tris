@@ -850,6 +850,14 @@ func (m *clientHelloMsg) randomizedMarshal() []byte {
 				z = z[4:]
 			})
 	}
+	if m.extendedMSSupported && common.FlipCoin() { // May be omitted
+		numExtensions++
+		extensionMarshalers = append(extensionMarshalers,
+			func() {
+				binary.BigEndian.PutUint16(z, extensionEMS)
+				z = z[4:]
+			})
+	}
 
 	// Optional, additional extensions
 
