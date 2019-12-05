@@ -1581,3 +1581,24 @@ func TestGetClientCertificate(t *testing.T) {
 		}
 	}
 }
+
+// [Psiphon]
+// https://github.com/golang/go/commit/e5b13401c6b19f58a8439f1019a80fe540c0c687
+func TestCloseClientConnectionOnIdleServer(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := Client(clientConn, testConfig.Clone())
+	go func() {
+		var b [1]byte
+		serverConn.Read(b[:])
+		client.Close()
+	}()
+	client.SetWriteDeadline(time.Now().Add(time.Second))
+	err := client.Handshake()
+	if err != nil {
+		if !strings.Contains(err.Error(), "read/write on closed pipe") {
+			t.Errorf("Error expected containing 'read/write on closed pipe' but got '%s'", err.Error())
+		}
+	} else {
+		t.Errorf("Error expected, but no error returned")
+	}
+}

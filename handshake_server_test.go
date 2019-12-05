@@ -203,9 +203,9 @@ func TestDontSelectRSAWithECDSAKey(t *testing.T) {
 
 func TestRenegotiationExtension(t *testing.T) {
 	clientHello := &clientHelloMsg{
-		vers:               VersionTLS12,
-		compressionMethods: []uint8{compressionNone},
-		random:             make([]byte, 32),
+		vers:                         VersionTLS12,
+		compressionMethods:           []uint8{compressionNone},
+		random:                       make([]byte, 32),
 		secureRenegotiationSupported: true,
 		cipherSuites:                 []uint16{TLS_RSA_WITH_RC4_128_SHA},
 	}
@@ -1008,7 +1008,7 @@ func TestFallbackSCSV(t *testing.T) {
 		name:   "FallbackSCSV",
 		config: &serverConfig,
 		// OpenSSL 1.0.1j is needed for the -fallback_scsv option.
-		command: []string{"openssl", "s_client", "-fallback_scsv"},
+		command:                       []string{"openssl", "s_client", "-fallback_scsv"},
 		expectHandshakeErrorIncluding: "inappropriate protocol fallback",
 	}
 	runServerTestTLS11(t, test)
@@ -1373,6 +1373,26 @@ func TestGetConfigForClient(t *testing.T) {
 				t.Errorf("test[%d]: expected error to contain %q but it was %q", i, test.errorSubstring, serverErr)
 			}
 		}
+	}
+}
+
+// [Psiphon]
+// https://github.com/golang/go/commit/e5b13401c6b19f58a8439f1019a80fe540c0c687
+func TestCloseServerConnectionOnIdleClient(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	server := Server(serverConn, testConfig.Clone())
+	go func() {
+		clientConn.Write([]byte{'0'})
+		server.Close()
+	}()
+	server.SetReadDeadline(time.Now().Add(time.Second))
+	err := server.Handshake()
+	if err != nil {
+		if !strings.Contains(err.Error(), "read/write on closed pipe") {
+			t.Errorf("Error expected containing 'read/write on closed pipe' but got '%s'", err.Error())
+		}
+	} else {
+		t.Errorf("Error expected, but no error returned")
 	}
 }
 
