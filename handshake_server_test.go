@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1469,6 +1470,37 @@ func TestTLSPointFormats(t *testing.T) {
 			}
 		})
 	}
+}
+
+// [Psiphon]
+// localPipe from:
+// https://github.com/golang/go/commit/be0f3c286b59a486bec798a4aa6e5eba512e49b8
+
+// localListener is set up by TestMain and used by localPipe to create Conn
+// pairs like net.Pipe, but connected by an actual buffered TCP connection.
+var localListener struct {
+	sync.Mutex
+	net.Listener
+}
+
+func localPipe(t testing.TB) (net.Conn, net.Conn) {
+	localListener.Lock()
+	defer localListener.Unlock()
+	c := make(chan net.Conn)
+	go func() {
+		conn, err := localListener.Accept()
+		if err != nil {
+			t.Errorf("Failed to accept local connection: %v", err)
+		}
+		c <- conn
+	}()
+	addr := localListener.Addr()
+	c1, err := net.Dial(addr.Network(), addr.String())
+	if err != nil {
+		t.Fatalf("Failed to dial local connection: %v", err)
+	}
+	c2 := <-c
+	return c1, c2
 }
 
 func bigFromString(s string) *big.Int {

@@ -32,16 +32,17 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // [Psiphon]
 // TestObfuscatedSessionTicket exercises the Obfuscated Session Tickets facility.
 func TestObfuscatedSessionTicket(t *testing.T) {
 
-	helloIDs := []ClientHelloID{
-		HelloAndroid_Auto,
-		HelloChrome_Auto,
-		HelloFirefox_Auto,
+	helloIDs := []utls.ClientHelloID{
+		utls.HelloChrome_Auto,
+		utls.HelloFirefox_Auto,
 	}
 
 	for _, helloID := range helloIDs {
@@ -51,7 +52,7 @@ func TestObfuscatedSessionTicket(t *testing.T) {
 	}
 }
 
-func runObfuscatedSessionTicket(t *testing.T, helloID ClientHelloID) {
+func runObfuscatedSessionTicket(t *testing.T, helloID utls.ClientHelloID) {
 
 	var standardSessionTicketKey [32]byte
 	rand.Read(standardSessionTicketKey[:])
@@ -62,7 +63,7 @@ func runObfuscatedSessionTicket(t *testing.T, helloID ClientHelloID) {
 	// Note: SNI and certificate CN intentionally don't match; if the
 	// session ticket is ignored, the TLS handshake will fail with
 	// a certificate error.
-	clientConfig := &Config{
+	clientConfig := &utls.Config{
 		ServerName: "www.example.com",
 	}
 
@@ -137,14 +138,23 @@ func runObfuscatedSessionTicket(t *testing.T, helloID ClientHelloID) {
 		}
 		defer tcpConn.Close()
 
-		tlsConn := UClient(tcpConn, clientConfig, helloID)
+		tlsConn := utls.UClient(tcpConn, clientConfig, helloID)
 
-		sessionState, err := NewObfuscatedClientSessionState(
+		obfuscatedSessionState, err := NewObfuscatedClientSessionState(
 			obfuscatedSessionTicketSharedSecret)
 		if err != nil {
 			report(err)
 			return
 		}
+
+		sessionState := utls.MakeClientSessionState(
+			obfuscatedSessionState.SessionTicket,
+			obfuscatedSessionState.Vers,
+			obfuscatedSessionState.CipherSuite,
+			obfuscatedSessionState.MasterSecret,
+			nil,
+			nil)
+
 		tlsConn.SetSessionState(sessionState)
 
 		_, err = tlsConn.Write([]byte(testMessage))
@@ -181,10 +191,10 @@ func generateCertificate() (*Certificate, error) {
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IsCA:         true,
-		SubjectKeyId: subjectKeyID[:],
-		MaxPathLen:   1,
-		Version:      2,
+		IsCA:                  true,
+		SubjectKeyId:          subjectKeyID[:],
+		MaxPathLen:            1,
+		Version:               2,
 	}
 
 	derCert, err := x509.CreateCertificate(
